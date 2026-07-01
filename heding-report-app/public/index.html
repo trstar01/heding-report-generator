@@ -1,3 +1,8 @@
+bash
+
+cat /home/claude/heding-report-app/public/index.html
+출력
+
 <!DOCTYPE html>
 <html lang="ko">
 <head>
@@ -546,6 +551,9 @@ body {
   .report-page { box-shadow: none; }
 }
 </style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth.js/1.6.0/mammoth.browser.min.js"></script>
+
 </head>
 <body>
 
@@ -567,12 +575,12 @@ body {
       <div class="upload-zone" id="uploadZone" onclick="document.getElementById('resumeInput').click()">
         <div class="upload-icon">📄</div>
         <div class="upload-text">
-          <strong>PDF 이력서를 올려주세요</strong>
+          <strong>이력서 파일을 올려주세요</strong>
           클릭하거나 파일을 드래그하세요<br>
-          <span style="font-size:10px;color:rgba(255,255,255,.2)">PDF 형식 · 최대 10MB</span>
+          <span style="font-size:10px;color:rgba(255,255,255,.2)">PDF 또는 Word(.docx) · 용량 제한 없음</span>
         </div>
       </div>
-      <input type="file" id="resumeInput" accept=".pdf" onchange="handleResumeUpload(event)">
+      <input type="file" id="resumeInput" accept=".pdf,.docx,.doc" onchange="handleResumeUpload(event)">
 
       <div class="extracted-info" id="extractedInfo">
         <div class="extracted-info-title">✓ 추출된 정보</div>
@@ -609,9 +617,19 @@ body {
       </div>
     </div>
 
+    <!-- 사전 설문 내용 -->
+    <div class="sidebar-section">
+      <div class="sidebar-section-title">③ 사전 설문 내용</div>
+      <div class="field">
+        <label>설문 응답 붙여넣기</label>
+        <textarea class="consult-textarea" id="surveyContent" placeholder="신청자가 작성한 사전설문 내용을 그대로 복사해서 붙여넣으세요.
+예) 이직 사유, 희망 업종, 처우 관련 답변, 어려운 점 등..."></textarea>
+      </div>
+    </div>
+
     <!-- 이직 목표 -->
     <div class="sidebar-section">
-      <div class="sidebar-section-title">③ 이직 목표</div>
+      <div class="sidebar-section-title">④ 이직 목표</div>
       <div class="field">
         <label>희망 직무</label>
         <input type="text" id="targetRole" placeholder="재무기획 · CFO 오피스">
@@ -643,7 +661,7 @@ body {
 
     <!-- 상담 내용 -->
     <div class="sidebar-section">
-      <div class="sidebar-section-title">④ 상담 내용 입력</div>
+      <div class="sidebar-section-title">⑤ 상담 내용 입력</div>
       <div class="field">
         <label>상담 핵심 내용</label>
         <textarea class="consult-textarea" id="consultContent" placeholder="상담에서 나온 주요 내용을 자유롭게 입력하세요.
@@ -661,7 +679,7 @@ body {
 
     <!-- 담당 컨설턴트 -->
     <div class="sidebar-section">
-      <div class="sidebar-section-title">⑤ 담당 컨설턴트</div>
+      <div class="sidebar-section-title">⑥ 담당 컨설턴트</div>
       <div class="field">
         <label>이름 (한글)</label>
         <input type="text" id="consultantName" placeholder="오시나" value="오시나">
@@ -724,55 +742,86 @@ let resumeText = '';
 let reportData = {};
 let isGenerating = false;
 
+// ── pdf.js worker 설정 ──
+if (window['pdfjsLib']) {
+  pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+}
+
+// ── 클라이언트에서 직접 텍스트 추출 (용량 제한 없음) ──
+async function extractPdfText(file) {
+  const arrayBuffer = await file.arrayBuffer();
+  const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+  let text = '';
+  for (let p = 1; p <= pdf.numPages; p++) {
+    const page = await pdf.getPage(p);
+    const content = await page.getTextContent();
+    text += content.items.map(item => item.str).join(' ') + '\n';
+  }
+  return text;
+}
+
+async function extractDocxText(file) {
+  const arrayBuffer = await file.arrayBuffer();
+  const result = await mammoth.extractRawText({ arrayBuffer });
+  return result.value;
+}
+
+async function extractFileText(file) {
+  const ext = file.name.split('.').pop().toLowerCase();
+  if (ext === 'pdf') return extractPdfText(file);
+  if (ext === 'docx' || ext === 'doc') return extractDocxText(file);
+  throw new Error('지원하지 않는 파일 형식입니다 (.pdf 또는 .docx만 가능)');
+}
+
 // ── 이력서 업로드 ──
 async function handleResumeUpload(event) {
   const file = event.target.files[0];
   if (!file) return;
 
   const zone = document.getElementById('uploadZone');
-  zone.innerHTML = `<div class="upload-icon">⏳</div><div class="upload-text"><strong>읽는 중...</strong>${file.name}</div>`;
+  zone.innerHTML = `<div class="upload-icon">⏳</div><div class="upload-text"><strong>읽는 중...</strong>${file.name}<br><span style="font-size:10px;color:rgba(255,255,255,.3)">파일 용량에 따라 시간이 걸릴 수 있습니다</span></div>`;
 
   try {
-    const arrayBuffer = await file.arrayBuffer();
-    const base64 = btoa(String.fromCharCode(...new Uint8Array(arrayBuffer)));
+    // 1. 브라우저에서 직접 텍스트 추출 (서버로 파일 전송 안 함 → 용량 제한 없음)
+    const extractedText = await extractFileText(file);
+    if (!extractedText || extractedText.trim().length < 20) {
+      throw new Error('이력서에서 텍스트를 읽지 못했습니다. 스캔본 이미지 PDF일 경우 텍스트 추출이 어려울 수 있습니다.');
+    }
+    resumeText = extractedText;
 
-    // API로 PDF 텍스트 추출
+    // 2. 추출된 텍스트(가벼움)만 서버로 보내 핵심 정보 파싱
     const res = await fetch('/api/parse-resume', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ pdfBase64: base64, filename: file.name })
+      body: JSON.stringify({ resumeText: extractedText, filename: file.name })
     });
 
     const data = await res.json();
-
     if (data.error) throw new Error(data.error);
 
-    resumeText = data.text;
+    // 3. 자동 필드 채우기 — 업로드된 이력서 기준으로 항상 덮어씀
+    const e = data.extracted || {};
+    document.getElementById('candidateName').value = e.name || '';
+    document.getElementById('currentCompany').value = e.company || '';
+    document.getElementById('currentTitle').value = e.title || '';
+    document.getElementById('careerYears').value = e.career || '';
+    document.getElementById('currentSalary').value = e.salary || '';
+    document.getElementById('certifications').value = e.certifications || '';
 
-    // 자동 필드 채우기
-    if (data.extracted) {
-      const e = data.extracted;
-      if (e.name) document.getElementById('candidateName').value = e.name;
-      if (e.company) document.getElementById('currentCompany').value = e.company;
-      if (e.title) document.getElementById('currentTitle').value = e.title;
-      if (e.career) document.getElementById('careerYears').value = e.career;
-      if (e.salary) document.getElementById('currentSalary').value = e.salary;
-      if (e.certifications) document.getElementById('certifications').value = e.certifications;
-
-      // 추출 정보 표시
-      const fieldsHtml = Object.entries(e)
-        .filter(([k, v]) => v)
-        .map(([k, v]) => `<div class="extracted-field"><span class="extracted-field-lbl">${getLbl(k)}</span><span class="extracted-field-val">${v}</span></div>`)
-        .join('');
-      document.getElementById('extractedFields').innerHTML = fieldsHtml;
-      document.getElementById('extractedInfo').classList.add('visible');
-    }
+    // 추출 정보 표시
+    const fieldsHtml = Object.entries(e)
+      .filter(([k, v]) => v)
+      .map(([k, v]) => `<div class="extracted-field"><span class="extracted-field-lbl">${getLbl(k)}</span><span class="extracted-field-val">${v}</span></div>`)
+      .join('');
+    document.getElementById('extractedFields').innerHTML = fieldsHtml || '<div style="font-size:11px;color:rgba(255,255,255,.3)">자동 추출된 항목이 없습니다. 좌측 입력란에 직접 입력해주세요.</div>';
+    document.getElementById('extractedInfo').classList.add('visible');
 
     zone.classList.add('uploaded');
     zone.innerHTML = `<div class="upload-icon">✅</div><div class="upload-text"><strong style="color:#2E9E5F">업로드 완료</strong>${file.name}<br><span style="font-size:10px;color:rgba(255,255,255,.3)">${(resumeText.length/1000).toFixed(1)}k자 추출됨</span></div>`;
 
   } catch (err) {
-    zone.innerHTML = `<div class="upload-icon">❌</div><div class="upload-text"><strong style="color:var(--red)">오류 발생</strong>${err.message}</div>`;
+    zone.classList.remove('uploaded');
+    zone.innerHTML = `<div class="upload-icon">❌</div><div class="upload-text"><strong style="color:var(--red)">오류 발생</strong>${err.message}<br><span style="font-size:10px;color:rgba(255,255,255,.25)">다시 클릭해서 재시도하세요</span></div>`;
   }
 }
 
@@ -789,9 +838,13 @@ uploadZone.addEventListener('drop', e => {
   e.preventDefault();
   uploadZone.classList.remove('dragover');
   const file = e.dataTransfer.files[0];
-  if (file && file.type === 'application/pdf') {
+  const validExt = ['pdf', 'docx', 'doc'];
+  const ext = file ? file.name.split('.').pop().toLowerCase() : '';
+  if (file && validExt.includes(ext)) {
     document.getElementById('resumeInput').files = e.dataTransfer.files;
     handleResumeUpload({ target: { files: e.dataTransfer.files } });
+  } else {
+    showError('PDF 또는 Word(.docx) 파일만 업로드할 수 있습니다.');
   }
 });
 
@@ -872,6 +925,7 @@ function collectInputs() {
     careerYears: document.getElementById('careerYears').value.trim(),
     currentSalary: document.getElementById('currentSalary').value.trim(),
     certifications: document.getElementById('certifications').value.trim(),
+    surveyContent: document.getElementById('surveyContent').value.trim(),
     targetRole: document.getElementById('targetRole').value.trim(),
     targetCompanyType: document.getElementById('targetCompanyType').value,
     targetSalary: document.getElementById('targetSalary').value.trim(),
